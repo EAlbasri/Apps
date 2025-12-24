@@ -1,0 +1,747 @@
+CREATE OR REPLACE PROCEDURE REPORTBH.P_CREATE_TIPLUS_BATCH
+
+AS
+
+    vUrbisDate        Number(8,0);
+    vReqId            Varchar2(20);
+    vTIRunID        Number(10,0);
+    vSource            Varchar2(10);
+    vAcmCde            Varchar2(10);
+    vUserCode        Varchar2(10);
+    vSupAcc            Varchar2(12);
+    vLocation       Varchar2(3);
+    vDefaultBr      Varchar2(8);
+    vTechAcc        Varchar2(12);
+    vManualPosAcc   Varchar2(7);
+    vManualPosBr    Varchar2(8);
+    vXSource        Varchar2(10);
+    vErrNum            Number(5,0);
+    vRunID            Number(10,0);
+    vErrMsg            Varchar2(200);
+    vRet            Number(10,0);
+    vBranch            Varchar2(2);
+    vINPDATEN8        Number(8,0);
+    vTranID            Varchar2(36);
+    vCount            Number(5,0);
+    vStep            Number(2);
+    vLastReq        Number;
+    vVATAcc12       Varchar2(12);
+    vVATAcc41       Varchar2(12);
+    vMasterRef        Varchar2(20);
+    vWorkgroup        Varchar2(8);
+    vSubProd        Varchar2(3);
+    vParentSubProd        Varchar2(3);
+    vForcePost      Varchar2(1);
+BEGIN
+
+    vSource := 'TIPOST';
+    vAcmCde := 'TFP';
+    vUserCode := 'TIPOST';
+    vXSource := 'TI';
+    vStep := 1;    
+
+    SELECT BLK_RUN_ID.NEXTVAL, URBIS_DATE INTO vRunID, vINPDATEN8 FROM ABCURBIS_INTERFACE WHERE REQ_ID = 5;
+    SELECT TO_NUMBER(TO_CHAR(TO_DATE(19570101,'YYYYMMDD') + AS_OF_REL,'YYYYMMDD')) INTO vUrbisDate
+        FROM SYSTWODB_DATES WHERE ONOFF_IND = 'ON';
+    
+    -- INSERT INTO ABCINF_TIPSTMSG table FROM TI
+    
+    vStep := 2;    
+    
+    SELECT NVL(MAX(TI_RUN_ID),0) INTO vTIRunID FROM ABCINF_TIPSTMSG;
+    
+    /*
+    SELECT COUNT(*) INTO vCount FROM FBTIMAN.JOBCONTROL@FBTIMAN WHERE NAME='EODScheduler' AND STATUS <> 'C';
+    IF vCount > 0 THEN
+       RETURN;
+    END IF;
+ 
+    SELECT COUNT(*) INTO vCount FROM FBTIMAN.KTRANHDR@FBTIMAN WHERE TRSTAT  = 'W'; 
+    IF vCount > 0 THEN
+       RETURN;
+    END IF;
+  */
+   
+    INSERT INTO ABCINF_TIPSTMSG
+    ( TRANSEQNO, INSERT_DATE, TRDATE, TRANID, TRSEQ, GZDTE, URBREPBR, GZEAN2, GZCCY, GZAMA, GZNEGP, PSTNARR, GZDLP, GZDLR,
+    EXTNARR1, EXTNARR2, EXTNARR3, EXTNARR4, GZNR1, GZNR2, GZNR3, GZNR4,  GZATP, GZSRC, GZMER,
+    BATCH_FULL_RECEIVED, PROCESSED, URBIS_DATE, TI_RUN_ID, GZANM, GZTCD, SPLIT_INCOME
+    )
+    SELECT TRAN_SEQNO.NEXTVAL,SYSDATE,TRDATE,GZWSID,GZSEQ,GZDTE,WORKGROUP,SUBSTR(TRIM(GZEAN2),1,20),TRIM(GZCCY),TRIM(GZAMA),TRIM(GZNEGP),TRIM(PSTNARR),TRIM(GZDLP), 
+    TRIM(GZDLR),TRIM(EXTNARR1),TRIM(EXTNARR2),TRIM(EXTNARR3),TRIM(EXTNARR4),TRIM(GZNR1), TRIM(GZNR2), TRIM(GZNR3), TRIM(GZNR4),TRIM(GZACT), TRIM(GZSRC), TRIM(GZRECN),
+    'Y', 'N', vUrbisDate, RUN_ID, TRIM(GZANMD),TRIM(GZTCD), 'N'
+    FROM ABCINF_TIPSTMSG@FBTIMAN
+    WHERE RUN_ID > vTIRunID;
+        
+    COMMIT;    
+   
+    -- Check any posting to be processed, if not return
+    SELECT COUNT(*) INTO vCount FROM ABCINF_TIPSTMSG WHERE PROCESSED = 'N';
+    IF vCount < 1 THEN
+        RETURN;
+    END IF;
+    
+    vStep := 3;    
+    
+    -- Get Default Value
+    SELECT URBIS_LOCATION, URBIS_BR, SUSPENSE_ACC, TECH_CL_ACC, MANUAL_POS_ACC, MANUAL_POS_ACC_BR, DEF_ACC_CTR
+    INTO vLocation, vBranch, vSupAcc, vTechAcc, vManualPosAcc, vManualPosBr, vDefaultBr
+    FROM ABCINF_TIBRANCH;
+    
+    vVATAcc12 := '602290116101';
+    vVATAcc41 := '602290416101';
+    
+    SELECT NVL(MAX(TI_RUN_ID),0) INTO vTIRunID FROM ABCINF_TIPSTMSG;
+    
+    -- **************** Update GZMER for accrual posting *******************************
+    
+    UPDATE ABCINF_TIPSTMSG SET GZMER = 'ACCRUAL'
+    WHERE 
+        PROCESSED = 'N' AND
+        BATCH_FULL_RECEIVED = 'Y' AND
+        TI_RUN_ID <= vTIRunID AND
+        GZMER IS NULL;
+    COMMIT;
+    
+    -- **************** Update TRTOT *******************************
+    FOR Trans IN(
+        SELECT TRANID, TRDATE, GZMER, COUNT(*) NO_OF_TRAN
+        FROM ABCINF_TIPSTMSG
+        WHERE 
+            PROCESSED = 'N' AND
+            TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+            TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') <= vUrbisDate AND
+            TO_NUMBER(TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD')) <= TO_NUMBER(TO_CHAR(TO_DATE(SUBSTR(TRDATE,2,6),'YYMMDD'),'YYYYMMDD')) AND
+            BATCH_FULL_RECEIVED = 'Y' AND
+            LENGTH(NVL(TRTOT,'0')) = 1 AND
+            TI_RUN_ID <= vTIRunID
+        GROUP BY TRANID, TRDATE, GZMER   
+    )
+    LOOP
+        UPDATE ABCINF_TIPSTMSG SET TRTOT = Trans.NO_OF_TRAN
+        WHERE TRANID = Trans.TRANID AND
+              TRDATE = Trans.TRDATE AND
+              GZMER =  Trans.GZMER  AND
+              TI_RUN_ID <= vTIRunID;
+        COMMIT;
+    END LOOP;
+    
+    vRet := F_INSERT_LOG( vRunID, vSource, vReqId, 0, vAcmCde, ' ', ' ', 'P_CREATE_TI_BATCH_POST', 0, 'Updated TRTOT', ' ', ' ' );
+    COMMIT WORK;
+    
+    
+    -- UPDATE branch for accrual  posting if empty
+   FOR Trans IN(
+        SELECT TRANSEQNO, GZDLR, GZMER, PSTNARR
+        FROM ABCINF_TIPSTMSG
+        WHERE 
+            PROCESSED = 'N' AND
+            TI_RUN_ID <= vTIRunID AND
+            GZMER = 'ACCRUAL' AND
+            NVL(LENGTH(TRIM(URBREPBR)),0) = 0            
+    )
+    LOOP
+        BEGIN
+            IF SUBSTR( TRIM(Trans.GZMER),1,3) IN ('FSA','FEL','FIL','FOC','FIC') THEN
+                vMasterRef := SUBSTR(Trans.PSTNARR,1,12);
+            ELSE
+                vMasterRef := TRIM(Trans.GZDLR);
+            END IF;
+
+            SELECT WRKGRP INTO vWorkgroup
+            FROM MASTER@FBTIMAN M, EXTMASTER@FBTIMAN E
+            WHERE M.KEY97 = E.MASTER
+                AND TRIM(M.MASTER_REF) = vMasterRef;
+        EXCEPTION 
+            WHEN OTHERS THEN 
+                vWorkgroup := NULL;
+        END;
+        UPDATE ABCINF_TIPSTMSG SET URBREPBR = vWorkgroup
+        WHERE TRANSEQNO = Trans.TRANSEQNO;
+        COMMIT;
+    
+    END LOOP;       
+
+    vRet := F_INSERT_LOG( vRunID, vSource, vReqId, 0, vAcmCde, ' ', ' ', 'P_CREATE_TI_BATCH_POST', 0, 'Updated Accrual', ' ', ' ' );    
+    
+   -- **************** Update prod sub type for split income by 50% ******************************       
+    FOR Trans IN(
+        SELECT TRANSEQNO, GZDLR, GZMER, PSTNARR
+        FROM ABCINF_TIPSTMSG
+        WHERE 
+            PROCESSED = 'N' AND
+            TI_RUN_ID <= vTIRunID 
+    )
+    LOOP
+        BEGIN
+            IF SUBSTR( TRIM(Trans.GZMER),1,3) IN ('FSA','FEL','FIL','FOC','FIC') THEN
+                vMasterRef := SUBSTR(Trans.PSTNARR,1,12);
+            ELSE
+                vMasterRef := TRIM(Trans.GZDLR);
+            END IF;
+
+            BEGIN
+                SELECT P.CODE INTO vSubProd
+                FROM MASTER@FBTIMAN M, PRODTYPE@FBTIMAN P
+                WHERE M.PRODTYPE = P.KEY97
+                    AND TRIM(M.MASTER_REF) = vMasterRef;      
+            EXCEPTION 
+                WHEN OTHERS THEN 
+                    vSubProd := 'X';
+            END;  
+            
+            BEGIN
+                IF SUBSTR( TRIM(vMasterRef),1,3) IN ('FSA','FEL','FIL','FOC','FIC') THEN 
+                    SELECT P.CODE INTO vParentSubProd
+                    FROM MASTER@FBTIMAN M, FNCEMASTER@FBTIMAN F, MASTER@FBTIMAN FM, PRODTYPE@FBTIMAN P
+                    WHERE M.KEY97 = F.KEY97 AND 
+                        F.FINCEDMSTR = FM.KEY97 AND
+                        FM.PRODTYPE = P.KEY97 AND 
+                        TRIM(M.MASTER_REF) = vMasterRef;
+                ELSE
+                 vParentSubProd := 'X';
+                END IF ;
+            EXCEPTION 
+                WHEN OTHERS THEN 
+                    vParentSubProd := 'X';
+            END;
+        END;
+        UPDATE ABCINF_TIPSTMSG SET SUBPROD = vSubProd, PARENT_SUBPROD = vParentSubProd
+        WHERE PROCESSED = 'N' AND TRANSEQNO = Trans.TRANSEQNO;
+        COMMIT;
+    
+    END LOOP; 
+    
+    vRet := F_INSERT_LOG( vRunID, vSource, vReqId, 0, vAcmCde, ' ', ' ', 'P_CREATE_TI_BATCH_POST', 0, 'Updated PRODTYPE for income split', ' ', ' ' );
+
+    UPDATE ABCINF_TIPSTMSG SET XDECIMAL = ( SELECT XDECIMAL  FROM SYSTWODB_CCYS WHERE GZCCY = SYSTWODB_CCYS.CCY )
+    WHERE PROCESSED = 'N' AND  TI_RUN_ID <= vTIRunID;
+
+   -- **************** split income by 50% for barzil transaction ******************************      
+    UPDATE ABCINF_TIPSTMSG SET SPLIT_INCOME = 'Y', AMOUNT1 = ROUND( ( TO_NUMBER(GZAMA) / POWER( 10, XDECIMAL ) * 0.7 ), XDECIMAL )
+        WHERE PROCESSED = 'N' AND  TI_RUN_ID <= vTIRunID 
+            AND (  ( SUBPROD = 'BZS' AND GZANM = 'SKCF' AND GZEAN2 = '5030108' AND GZNEGP = 'C' )
+                OR ( PARENT_SUBPROD = 'BZS' AND GZANM = 'SP626' AND GZEAN2 = '5010908' AND GZNEGP = 'C' )
+                OR ( PARENT_SUBPROD = 'BZS' AND GZANM = 'SP631' AND GZEAN2 = '5022900' AND GZNEGP = 'D' )  
+                );
+    
+    UPDATE ABCINF_TIPSTMSG SET AMOUNT2 = ROUND( TO_NUMBER(GZAMA) / POWER( 10, XDECIMAL ), XDECIMAL ) - AMOUNT1
+        WHERE PROCESSED = 'N' AND  TI_RUN_ID <= vTIRunID 
+            AND (  ( SUBPROD = 'BZS' AND GZANM = 'SKCF' AND GZEAN2 = '5030108' AND GZNEGP = 'C' )
+                OR ( PARENT_SUBPROD = 'BZS' AND GZANM = 'SP626' AND GZEAN2 = '5010908' AND GZNEGP = 'C' )
+                OR ( PARENT_SUBPROD = 'BZS' AND GZANM = 'SP631' AND GZEAN2 = '5022900' AND GZNEGP = 'D' ) 
+                );    
+    -- ******************************  Select all postings  ****************************************
+    
+    vRet := F_INSERT_LOG( vRunID, vSource, vReqId, 0, vAcmCde, ' ', ' ', 'P_CREATE_TI_BATCH_POST', 0, 'Updated Amount1 and Amount 2 for income split', ' ', ' ' );
+
+    FOR Posting_Trans IN(
+        SELECT TRANID, TRDATE, GZMER
+        --, MIN(TRANSEQNO) MIN_TRANSEQ, MAX(TRANSEQNO) MAX_TRANSEQ
+        FROM
+        (
+            SELECT DECODE( TO_NUMBER(TRTOT), 1, '1001', TRANID) TRANID, TRDATE, GZMER, TRANSEQNO
+            FROM ABCINF_TIPSTMSG
+            WHERE 
+                PROCESSED = 'N' AND 
+                TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+                TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') <= vUrbisDate AND
+                BATCH_FULL_RECEIVED = 'Y' AND
+                TO_NUMBER(TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD')) <= TO_NUMBER(TO_CHAR(TO_DATE(SUBSTR(TRDATE,2,6),'YYMMDD'),'YYYYMMDD')) AND
+                TI_RUN_ID <= vTIRunID
+        )
+        GROUP BY TRANID, TRDATE, GZMER
+        ORDER BY TRANID, TRDATE, GZMER
+    )    
+
+    LOOP
+
+        vStep := 4;    
+    
+        vTranID := Posting_Trans.TRANID;
+    
+        SELECT SUBSTR(vSource,1,2) || TO_CHAR(SYSDATE,'YYMMDD') || TRAN_SEQNO.NEXTVAL INTO vReqId FROM DUAL;
+
+        -- Insert into Request Details
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+           BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+           POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+           NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7, PSEQNR, AMOUNT2, PROD_TYPE )
+        (
+        SELECT vSource SOURCE, vReqId,
+                 ROWNUM REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME, TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') VALUE_DATEN8,
+                 CASE 
+                    WHEN TRIM(GZANM) = 'SP632' AND SUBSTR( TRIM(URBREPBR),1,2) = '41' THEN '41064162'
+                    WHEN TRIM(GZANM) = 'SP632' AND SUBSTR( TRIM(URBREPBR),1,2) = '12' THEN '12064162'
+                    WHEN TRIM(GZANM) = 'SP632' AND SUBSTR( TRIM(URBREPBR),1,2) = '11' THEN '12064162'
+                 ELSE NVL( TRIM(URBREPBR), '') END BRANCH,      
+                 TRIM(SUBSTR(GZEAN2,1,12)) XACCOUNT, GZCCY CCY, ' ' REQ_STAT, ' ' POSTED,
+                 CASE WHEN SPLIT_INCOME = 'Y' THEN AMOUNT1 ELSE TO_NUMBER(GZAMA) END AMOUNT,
+                 GZNEGP DR_CR, ' ' AUTH, ' ' NARR_CODE, 
+                 
+                 CASE WHEN SUBSTR( TRIM(GZMER),1,3) IN ('FSA','FEL','FIL','FOC','FIC') OR SUBSTR( TRIM(GZDLP),1,3) IN ('FSA','FEL','FIL','FOC','FIC') THEN
+                    CASE WHEN TRIM(GZMER) = 'ACCRUAL' THEN 'CLDL 011801  ' || CASE WHEN SUBSTR(TRIM(GZDLR),1,3) <> TRIM(GZDLP) THEN TRIM(GZDLP) || TRIM(GZDLR) ELSE TRIM(GZDLR) END || ' DLY ACCR'
+                    WHEN SUBSTR( TRIM(GZMER), 12, 3) = 'CRE' THEN 'CLDL CLDL ST ' || SUBSTR( PSTNARR,1,12)
+                    --WHEN SUBSTR( TRIM(GZMER), 12, 3) IN ('RFS','FRJ','SRF') THEN 'CLDL CLDL MA ' || SUBSTR( PSTNARR,1,12)
+                    WHEN SUBSTR( TRIM(GZMER), 12, 3) IN ('RFS','FRJ','SRF') THEN 'CLDL CLDL MA ' || CASE WHEN TRIM(GZATP) = 'QF' THEN SUBSTR( PSTNARR,9,12) ELSE SUBSTR( PSTNARR,1,12) END
+                    ELSE TRIM(PSTNARR) END        
+                 ELSE TRIM(PSTNARR) END POST_NARR,
+                 
+                 DECODE(SIGN(7-LENGTH(TRIM(GZEAN2))), -1, 'C', 'G' ) CA_GL_IND,
+                 vSource CHEQUE , 'NCHG' CHTRANS, 0 ERR_NBR, 
+                                  
+                 --CASE WHEN SUBSTR(TRIM(GZDLR),1,3) <> TRIM(GZDLP) THEN TRIM(GZDLP) || TRIM(GZDLR) ELSE TRIM(GZDLR) END EXDEALID,
+                 CASE WHEN SUBSTR( TRIM(GZMER),1,3) IN ('FSA','FEL','FIL','FOC','FIC') OR SUBSTR( TRIM(GZDLP),1,3) IN ('FSA','FEL','FIL','FOC','FIC') THEN
+                    CASE WHEN TRIM(GZMER) = 'ACCRUAL' THEN TRIM(GZDLR)
+                    WHEN TRIM(GZATP) = 'QF' THEN SUBSTR( PSTNARR,9,12)
+                    ELSE SUBSTR( PSTNARR,1,12) END
+                 ELSE TRIM(GZDLR) END EXDEALID,             
+                 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                 
+                 CASE WHEN GZTCD = '083' THEN 'TAKE CASH MARGIN' WHEN GZTCD = '583' THEN 'REFUND CASH MARGIN' ELSE SUBSTR(TRIM(EXTNARR1),1,35) END NARRATIVE2,                     
+                 CASE WHEN GZTCD = '083' OR GZTCD = '583' THEN SUBSTR(TRIM(EXTNARR1),1,35) ELSE SUBSTR(TRIM(EXTNARR2),1,35) END NARRATIVE3,
+                 CASE WHEN GZTCD = '083' OR GZTCD = '583' THEN SUBSTR(TRIM(EXTNARR2),1,35) ELSE SUBSTR(TRIM(EXTNARR3),1,35) END NARRATIVE4,
+                 CASE WHEN GZTCD = '083' OR GZTCD = '583' THEN SUBSTR(TRIM(EXTNARR3),1,35) ELSE SUBSTR(TRIM(EXTNARR4),1,35) END NARRATIVE5,
+                 CASE WHEN GZTCD = '083' OR GZTCD = '583' THEN SUBSTR(TRIM(EXTNARR4),1,35) ELSE '' END NARRATIVE6,
+                 
+                 --SUBSTR(TRIM(EXTNARR1),1,35),
+                 --SUBSTR(TRIM(EXTNARR2),1,35),
+                 --SUBSTR(TRIM(EXTNARR3),1,35),
+                 --SUBSTR(TRIM(EXTNARR4),1,35),
+                 --'',
+                 TO_NUMBER(DECODE( LENGTH(TRIM(GZEAN2)),12,SUBSTR(TRIM(GZEAN2),1,6), 0)), GZATP,
+                 SUBSTR(GZSRC,1,2), TRIM(GZANM), CASE WHEN SPLIT_INCOME  = 'Y' THEN 1 ELSE 0 END ,
+                 CASE WHEN SPLIT_INCOME = 'Y' THEN AMOUNT2 ELSE 0 END AMOUNT2,
+                 TRIM(GZDLP)
+        FROM ABCINF_TIPSTMSG
+        WHERE PROCESSED = 'N' AND
+                TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+                TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') <= vUrbisDate AND
+                TRDATE = Posting_Trans.TRDATE AND
+                GZMER = Posting_Trans.GZMER AND
+                BATCH_FULL_RECEIVED = 'Y' AND
+                DECODE( TO_NUMBER(TRTOT), 1, '1001', TRANID) = Posting_Trans.TRANID AND
+                TI_RUN_ID <= vTIRunID 
+                --AND
+                --TRANSEQNO BETWEEN Posting_Trans.MIN_TRANSEQ AND Posting_Trans.MAX_TRANSEQ
+        );
+        
+         vStep := 44;  
+         
+        -- split income
+        INSERT INTO ABC_REQPO
+        ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+           BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+           POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+           NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7, PSEQNR )
+        SELECT SOURCE, REQ_ID, R.REQ_SEQ + ROWNUM, RUN_ID, GLB_DTIME, VAL_DATEN8,
+           '12037911' BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT2, DR_CR, AUTH, NARR_CODE,
+           POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+           NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7, 2 PSEQNR
+        FROM ABC_REQPO,
+            ( SELECT MAX(REQ_SEQ) REQ_SEQ FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId) R
+        WHERE SOURCE = vSource AND REQ_ID = vReqId AND NVL(PSEQNR,0) = 1 AND NVL(AMOUNT2,0) <> 0;
+        
+        -- end of split        
+                
+        UPDATE ABC_REQPO SET POST_NARR = ' ' WHERE SOURCE = vSource AND REQ_ID = vReqId AND NVL( POST_NARR, 'NULL') = 'NULL';
+        UPDATE ABC_REQPO SET NARRATIVE2 = '', NARRATIVE3 = '', NARRATIVE4 = '', NARRATIVE5 = '', NARRATIVE6 = '' WHERE SOURCE = vSource AND REQ_ID = vReqId AND CA_GL_IND = 'G';
+        UPDATE ABC_REQPO SET AMOUNT = ( SELECT AMOUNT / POWER( 10, XDECIMAL ) FROM SYSTWODB_CCYS WHERE ABC_REQPO.CCY = SYSTWODB_CCYS.CCY ) WHERE SOURCE = vSource AND REQ_ID = vReqId AND AMOUNT <> 0 AND NVL(PSEQNR,0) NOT IN (1,2);
+        -- Manual Position branch update
+        UPDATE ABC_REQPO SET BRANCH = vManualPosBr WHERE SOURCE = vSource AND REQ_ID = vReqId AND XACCOUNT = vManualPosAcc;
+        
+        -- End of Insertion
+        
+        
+        -- Balancing entries by ccy
+        
+        INSERT INTO ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            CLIENT_NO)
+        SELECT P.SOURCE, P.REQ_ID, T.MAX_SEQ + ROWNUM REQ_SEQ, P.RUN_ID, P.GLB_DTIME, P.VAL_DATEN8,
+            ' ' BRANCH, vSupAcc XACCOUNT, P.CCY, P.REQ_STAT, P.POSTED, E.EXTRA_AMT AS AMOUNT,E.EXTRA_DR_CR AS DR_CR, P.AUTH, P.NARR_CODE,
+            'BALANCING ENTRY' AS NARRATIVE, 'C' AS CA_GL_IND, P.CHEQUE, P.CH_TRANS, 0 ERR_NBR, P.EXDEALID, P.RATE1, P.TRANS_ID, P.XSOURCE,
+          0 AS CLIENT_NO 
+        FROM ABC_REQPO P,
+                (SELECT MAX(REQ_SEQ) MAX_SEQ FROM ABC_REQPO
+                    WHERE SOURCE = vSource  AND REQ_ID = vReqId
+                ) T,
+                (
+                    SELECT SOURCE,REQ_ID
+                        ,CCY
+                        ,DECODE(SIGN(SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT)),-1,'C','D') EXTRA_DR_CR
+                        ,ABS(SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT)) EXTRA_AMT
+                        ,MIN(REQ_SEQ) MREQ_SEQ
+                    FROM ABC_REQPO
+                    WHERE SOURCE = vSource AND REQ_ID = vReqId
+                    GROUP BY SOURCE,REQ_ID,CCY
+                    HAVING SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT) <> 0
+                ) E
+        WHERE P.SOURCE = vSource AND 
+              P.REQ_ID = vReqId AND
+              P.SOURCE = E.SOURCE AND 
+              P.REQ_ID = E.REQ_ID  AND
+              P.REQ_SEQ = E.MREQ_SEQ
+        ;                 
+
+        vStep := 5;
+        
+        -- VAT Sweep postings
+        SELECT NVL( MAX(REQ_SEQ),0) REQ_SEQ INTO vLastReq FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId;
+        
+        vStep := 51;
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7 )
+        SELECT  vSource SOURCE, vReqId, ROWNUM + vLastReq REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME, VAL_DATEN8,
+                ' ' BRANCH, CASE WHEN SUBSTR(BRANCH,1,2) = '41' THEN vVATAcc41 ELSE vVATAcc12 END XACCOUNT, CCY, ' ' REQ_STAT, ' ' POSTED, AMOUNT, DECODE( DR_CR,'D','C','D'), ' ' AUTH, ' ' NARR_CODE,
+                POST_NARR, 'C' CA_GL_IND, vSource CHEQUE, 'NCHG' CHTRANS, 0 ERR_NBR, EXDEALID, 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                ' ' NARRATIVE2, ' ' NARRATIVE3, ' ' NARRATIVE4, ' ' NARRATIVE5, ' ' NARRATIVE6, 0 CLIENT_NO, ' ' NDG, ' ' POSITION_NO, 'VAT' 
+        FROM ABC_REQPO
+        WHERE SOURCE = vSource AND REQ_ID = vReqId AND NARRATIVE7 = 'SPT12' AND CCY <> 'BHD';
+        
+        vStep := 52;
+        SELECT NVL( MAX(REQ_SEQ),0) REQ_SEQ INTO vLastReq FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId;
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7 )
+        SELECT  vSource SOURCE, vReqId, ROWNUM + vLastReq REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME,  VAL_DATEN8,
+                CASE WHEN SUBSTR(BRANCH,1,2) = '41' THEN '41064162' ELSE vManualPosBr END BRANCH, vManualPosAcc XACCOUNT, CCY, ' ' REQ_STAT, ' ' POSTED, AMOUNT, DR_CR, ' ' AUTH, ' ' NARR_CODE,
+                POST_NARR, 'G' CA_GL_IND, vSource CHEQUE, 'NCHG' CHTRANS, 0 ERR_NBR, EXDEALID, 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                ' ' NARRATIVE2, ' ' NARRATIVE3, ' ' NARRATIVE4, ' ' NARRATIVE5, ' ' NARRATIVE6, 0 CLIENT_NO, ' ' NDG, ' ' POSITION_NO, 'VAT'
+        FROM ABC_REQPO                
+        WHERE SOURCE = vSource AND REQ_ID = vReqId AND NARRATIVE7 = 'SPT12' AND CCY <> 'BHD';
+
+        vStep := 53;
+        SELECT NVL( MAX(REQ_SEQ),0) REQ_SEQ INTO vLastReq FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId;
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7 )
+        SELECT  vSource SOURCE, vReqId, ROWNUM + vLastReq REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME, VAL_DATEN8,
+                CASE WHEN SUBSTR(BRANCH,1,2) = '41' THEN '41064162' ELSE vManualPosBr END BRANCH, vManualPosAcc XACCOUNT, 'BHD' CCY, ' ' REQ_STAT, ' ' POSTED, CBB_CCYRATE_ANY_BASE_DATE( AMOUNT, CCY, 'BHD', VAL_DATEN8 ), DECODE( DR_CR,'D','C','D'), ' ' AUTH, ' ' NARR_CODE,
+                POST_NARR, 'G' CA_GL_IND, vSource CHEQUE, 'NCHG' CHTRANS, 0 ERR_NBR, EXDEALID, 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                ' ' NARRATIVE2, ' ' NARRATIVE3, ' ' NARRATIVE4, ' ' NARRATIVE5, ' ' NARRATIVE6, 0 CLIENT_NO, ' ' NDG, ' ' POSITION_NO, 'VAT'
+        FROM ABC_REQPO                
+        WHERE SOURCE = vSource AND REQ_ID = vReqId AND NARRATIVE7 = 'SPT12' AND CCY <> 'BHD';
+        
+        vStep := 54;
+        SELECT NVL( MAX(REQ_SEQ),0) REQ_SEQ INTO vLastReq FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId;
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO, NARRATIVE7 )
+        SELECT  vSource SOURCE, vReqId, ROWNUM +  vLastReq REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME, VAL_DATEN8,
+                ' ' BRANCH, CASE WHEN SUBSTR(BRANCH,1,2) = '41' THEN vVATAcc41 ELSE vVATAcc12 END XACCOUNT, 'BHD' CCY, ' ' REQ_STAT, ' ' POSTED, CBB_CCYRATE_ANY_BASE_DATE( AMOUNT, CCY, 'BHD', VAL_DATEN8 ), DR_CR, ' ' AUTH, ' ' NARR_CODE,
+                POST_NARR, 'C' CA_GL_IND, vSource CHEQUE, 'NCHG' CHTRANS, 0 ERR_NBR, EXDEALID, 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                ' ' NARRATIVE2, ' ' NARRATIVE3, ' ' NARRATIVE4, ' ' NARRATIVE5, ' ' NARRATIVE6, 0 CLIENT_NO, ' ' NDG, ' ' POSITION_NO, 'VAT'
+        FROM ABC_REQPO                
+        WHERE SOURCE = vSource AND REQ_ID = vReqId AND NARRATIVE7 = 'SPT12' AND CCY <> 'BHD';
+
+        --UPDATE ABC_REQPO SET NARRATIVE7 = '' WHERE SOURCE = vSource AND REQ_ID = vReqId;
+        -- End of VAT Sweep
+        
+        vStep := 6;    
+        
+        -- Inter Branch entries
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, CLIENT_NO, NDG, POSITION_NO )
+
+        SELECT  vSource SOURCE, vReqId, R.REQ_SEQ + ROWNUM REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME, vUrbisDate VAL_DATEN8,
+                ' ' BRANCH, 
+                --DECODE( B.BRANCH, '12', '101020410101', '41', DECODE( B.CCY, 'AED', '101030120102', '101030120101')) XACCOUNT,
+                DECODE( B.BRANCH, '12', '101020410101', '41', '101030120101') XACCOUNT,
+                B.CCY CCY, ' ' REQ_STAT, ' ' POSTED, B.BALANCING_AMT, DECODE( B.BALANCING_DR_CR,'D','C','D'), ' ' AUTH, ' ' NARR_CODE,
+                'BALANCING ENTRY ' || ABC_REQPO.EXDEALID POST_NARR, 'C' CA_GL_IND, vSource CHEQUE, 'NCHG' CHTRANS, 0 ERR_NBR,
+                ABC_REQPO.EXDEALID EXDEALID, 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                ' ' NARRATIVE2, ' ' NARRATIVE3, ' ' NARRATIVE4, ' ' NARRATIVE5, ' ' NARRATIVE6,
+                0 CLIENT_NO, ' ' NDG, ' ' POSITION_NO
+
+        FROM ABC_REQPO,
+        (SELECT REQ_ID,
+                 DECODE( CA_GL_IND, 'G', CASE WHEN SUBSTR(BRANCH,1,2) = '11' THEN '12' ELSE SUBSTR(BRANCH,1,2) END,  CASE WHEN SUBSTR(XACCOUNT,7,2) = '11' THEN '12' ELSE SUBSTR(XACCOUNT,7,2) END ) BRANCH,
+                 CCY,
+                 DECODE(SIGN(SUM(DECODE(DR_CR,'D',-1,1) * AMOUNT)),-1,'C','D') BALANCING_DR_CR,
+                 ABS(SUM(DECODE(DR_CR,'D',-1,1) * AMOUNT)) BALANCING_AMT,
+                 MIN(REQ_SEQ) REQ_SEQ
+        FROM ABC_REQPO
+        WHERE SOURCE = vSource AND REQ_ID = vReqId
+       GROUP BY REQ_ID,CCY,DECODE( CA_GL_IND, 'G', CASE WHEN SUBSTR(BRANCH,1,2) = '11' THEN '12' ELSE SUBSTR(BRANCH,1,2)  END , CASE WHEN SUBSTR(XACCOUNT,7,2) = '11' THEN '12' ELSE SUBSTR(XACCOUNT,7,2) END )
+        HAVING SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT) <> 0
+        ) B,
+        ( SELECT MAX(REQ_SEQ) REQ_SEQ FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId) R,
+        (SELECT REQ_ID
+        FROM ABC_REQPO
+        WHERE SOURCE = vSource AND REQ_ID = vReqId
+        GROUP BY REQ_ID
+        HAVING SUM(DISTINCT DECODE( CA_GL_IND, 'G', CASE WHEN SUBSTR(BRANCH,1,2) = '11' THEN '12' ELSE SUBSTR(BRANCH,1,2)  END , CASE WHEN SUBSTR(XACCOUNT,7,2) = '11' THEN '12' ELSE  SUBSTR(XACCOUNT,7,2) END  )) = 53
+        ) I
+        WHERE ABC_REQPO.REQ_ID = B.REQ_ID AND
+                ABC_REQPO.REQ_SEQ = B.REQ_SEQ AND
+                ABC_REQPO.REQ_ID = I.REQ_ID
+        ;
+
+        vStep := 7;    
+        
+        -- Update Account open template ID and account title
+        UPDATE ABC_REQPO SET TEMPLATE_ID = ( SELECT DISTINCT TEMPLATE_ID FROM V_ACC_TEMPLATE WHERE SUBSTR( XACCOUNT, 9, 2 ) = BUSINESS_TYPE AND SOURCE = vSource AND CUST_TYPE = 'NONE' ),
+                     TEMPLATE_CCY = '****'
+        WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C';
+
+        -- Update Account open template ID for intergroup account
+        UPDATE ABC_REQPO P SET P.TEMPLATE_ID =
+                    ( SELECT A.TEMPLATE_ID FROM V_ACC_TEMPLATE A, SYSTWODB_CLINM C
+                      WHERE SUBSTR( P.XACCOUNT, 9, 2 ) = A.BUSINESS_TYPE AND SUBSTR( P.XACCOUNT, 1, 6) = C.CLIENT_NO AND
+                              INSTR( A.CUST_TYPE, ',' || C.BUS_GRP ) <> 0 AND A.SOURCE = vSource AND A.CUST_TYPE <> 'NONE'
+                    )
+        WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C' AND
+        ( SUBSTR(P.XACCOUNT,9,2), SUBSTR( P.XACCOUNT, 1, 6) ) IN
+            ( SELECT A.BUSINESS_TYPE, C.CLIENT_NO FROM V_ACC_TEMPLATE A, SYSTWODB_CLINM C
+                      WHERE INSTR( A.CUST_TYPE, ',' || C.BUS_GRP ) <> 0 AND A.SOURCE = vSource AND A.CUST_TYPE <> 'NONE'
+                    );
+
+        UPDATE ABC_REQPO SET ACCOUNT_TITLE = ( SELECT XNAME FROM SYSTWODB_CLINM WHERE CLIENT_NO = ABC_REQPO.CLIENT_NO )
+        WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C';
+
+        UPDATE ABC_REQPO SET ACCOUNT_TITLE = ' ', TEMPLATE_CCY = ' ', TEMPLATE_ID = ' ' WHERE SOURCE = vSource AND REQ_ID = vReqId AND CA_GL_IND = 'G';
+
+        -- Update GL value date to today
+        UPDATE ABC_REQPO SET VAL_DATEN8 = vUrbisDate WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'G';
+
+        -- Change Value date to today if the libaility account does not exists in Urbis and transaction value date is past    
+        UPDATE ABC_REQPO SET VAL_DATEN8 = vUrbisDate WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C' AND 
+        SUBSTR( XACCOUNT,9,2) IN (  SELECT BUSINESS_TYPE FROM V_ACC_TEMPLATE ) AND
+        XACCOUNT || CCY NOT IN ( SELECT  XACCOUNT || CCY FROM SYSTWODB_CASTM );
+
+
+        vStep := 8;    
+        
+        -- Balancing entries by value date and ccy
+        
+        INSERT INTO ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+            POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+            CLIENT_NO)
+        SELECT P.SOURCE, P.REQ_ID, T.MAX_SEQ + ROWNUM REQ_SEQ, P.RUN_ID, P.GLB_DTIME, E.VAL_DATEN8,
+            ' ' BRANCH, vTechAcc XACCOUNT, P.CCY, P.REQ_STAT, P.POSTED, E.EXTRA_AMT AS AMOUNT,E.EXTRA_DR_CR AS DR_CR, P.AUTH, P.NARR_CODE,
+            'BALANCING ENTRY '|| E.VAL_DATEN8 AS NARRATIVE, 'C' AS CA_GL_IND, P.CHEQUE, P.CH_TRANS, 0 ERR_NBR, P.EXDEALID, P.RATE1, P.TRANS_ID, P.XSOURCE,
+          0 AS CLIENT_NO 
+        FROM ABC_REQPO P,
+                (SELECT MAX(REQ_SEQ) MAX_SEQ FROM ABC_REQPO
+                    WHERE SOURCE = vSource  AND REQ_ID = vReqId
+                ) T,
+                (
+                    SELECT SOURCE,REQ_ID
+                        ,VAL_DATEN8
+                        ,CCY
+                        ,DECODE(SIGN(SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT)),-1,'C','D') EXTRA_DR_CR
+                        ,ABS(SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT)) EXTRA_AMT
+                        ,MIN(REQ_SEQ) MREQ_SEQ
+                    FROM ABC_REQPO
+                    WHERE SOURCE = vSource AND REQ_ID = vReqId
+                    GROUP BY SOURCE,REQ_ID,VAL_DATEN8,CCY
+                    HAVING SUM(DECODE(DR_CR,'D',-1,1)*AMOUNT) <> 0
+                ) E
+        WHERE P.SOURCE = vSource AND 
+              P.REQ_ID = vReqId AND
+              P.SOURCE = E.SOURCE AND 
+              P.REQ_ID = E.REQ_ID  AND
+              P.REQ_SEQ = E.MREQ_SEQ
+        ;
+
+        
+        vStep := 9;    
+        vStep := 9;    
+        vForcePost := ' ';
+        SELECT COUNT(*) INTO vCount FROM ABC_REQPO WHERE SOURCE = vSource AND REQ_ID = vReqId AND CA_GL_IND = 'C' AND NDG IN ('MI') 
+            AND NVL(PROD_TYPE,'X') NOT IN ('PCO','PBO','PBI','PCI','CPC','CPB','CPO');
+        IF vCount > 0 THEN
+            vForcePost := 'B';
+        END IF;        
+        
+        IF vForcePost = 'B' THEN 
+            SELECT COUNT(*) INTO vCount
+            FROM ABC_REQPO D, SYSTWODB_CASTM C
+            WHERE SOURCE = vSource AND REQ_ID = vReqId AND CA_GL_IND = 'C' AND NDG NOT IN ('MI') 
+                AND NVL(PROD_TYPE,'X') NOT IN ('PCO','PBO','PBI','PCI','CPC','CPB','CPO')
+                AND D.XACCOUNT = C.XACCOUNT 
+                AND D.CCY = C.CCY
+                --AND NVL(C.BLOCK_CODE, '') <> '';
+                 AND ( NVL(C.BLOCK_CODE, '') = 'B' OR D.DR_CR = NVL(C.BLOCK_CODE, '') );
+                
+            IF vCount > 0 THEN
+                vForcePost := ' ';
+            END IF;                    
+        END IF;
+        
+        -- Insert into Request Header
+        INSERT INTO ABC_REQHD (SOURCE, ACM_CDE, REQ_ID, REQ_STAT, PROC_STAT, VALUE_DATE, ACTION_NO, RUN_ID,
+                ERR_NO, USERCODE, AUTHCODE, BTCH_STAT, BATCH_NO, BRANCH, ERR_NBR, FORCE_POST, INP_DATEN8, LOCATION, PROJECTED,
+                REQUEST_NO, SUSPIND, SUSPENSE)
+        VALUES(vSource, vAcmCde, vReqId, 'C', 'C', vUrbisDate, 0, 0, 0, vUserCode, ' ', 'C', 0, vDefaultBr, 0, vForcePost,
+                 vUrbisDate, vLocation, 'N', 0, '0', vSupAcc);
+
+         -- End of Insert Request Header
+
+        vStep := 10;    
+        -- Update processed flag
+        UPDATE ABCINF_TIPSTMSG SET PROCESSED = 'Y', PROCESSED_DATE = SYSDATE, BATCH_ID = vReqId
+        WHERE PROCESSED = 'N' AND
+                TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+                TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') <= vUrbisDate AND
+                BATCH_FULL_RECEIVED = 'Y' AND
+                DECODE( TO_NUMBER(TRTOT), 1, '1001', TRANID) = Posting_Trans.TRANID AND
+                TRDATE = Posting_Trans.TRDATE AND
+                GZMER = Posting_Trans.GZMER AND
+                --TRANSEQNO BETWEEN Posting_Trans.MIN_TRANSEQ AND Posting_Trans.MAX_TRANSEQ AND
+                TI_RUN_ID <= vTIRunID;
+
+        -- End of processed falg update
+
+        -- Insert Log
+        vStep := 11;    
+        vRet := F_INSERT_LOG( vRunID, vSource, vReqId, 0, vAcmCde, ' ', ' ', 'P_CREATE_TI_BATCH_POST', 0, 'Created TI Posting Batch: ' || vReqId, ' ', ' ' );
+        COMMIT WORK;
+
+    END LOOP;
+
+    -- **************************  End of Postings ********************************************
+
+ --  *********************************    Select projection  ****************************
+
+    vSource := 'TIPROJ';
+    vAcmCde := 'TFPJ';
+    vStep := 11;
+    
+    -- Get Default Value
+    SELECT URBIS_LOCATION, URBIS_BR, SUSPENSE_ACC, TECH_CL_ACC, MANUAL_POS_ACC, MANUAL_POS_ACC_BR, DEF_ACC_CTR
+    INTO vLocation, vBranch, vSupAcc, vTechAcc, vManualPosAcc, vManualPosBr, vDefaultBr
+    FROM ABCINF_TIBRANCH;
+    
+    FOR Projection_Trans IN(
+        SELECT DISTINCT TRANID, ''BRANCH
+        FROM ABCINF_TIPSTMSG
+        WHERE PROCESSED = 'N' AND
+            TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+            TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') > vUrbisDate AND
+            BATCH_FULL_RECEIVED = 'Y' 
+    )
+
+    LOOP
+
+        vStep := 12;
+        
+        vTranID := Projection_Trans.TRANID;
+        SELECT SUBSTR(vSource,1,2) || TO_CHAR(SYSDATE,'YYMMDD') || TRAN_SEQNO.NEXTVAL INTO vReqId FROM DUAL;
+
+        -- Insert into Request Details
+        INSERT INTO  ABC_REQPO ( SOURCE, REQ_ID, REQ_SEQ, RUN_ID, GLB_DTIME, VAL_DATEN8,
+            BRANCH, XACCOUNT, CCY, REQ_STAT, POSTED, AMOUNT, DR_CR, AUTH, NARR_CODE,
+           POST_NARR, CA_GL_IND, CHEQUE, CH_TRANS, ERR_NBR, EXDEALID, RATE1, TRANS_ID, XSOURCE,
+           NARRATIVE2, NARRATIVE3, NARRATIVE4, NARRATIVE5, NARRATIVE6, NDG  )
+        (
+        SELECT vSource SOURCE, vReqId,
+                 ROWNUM REQ_SEQ, 0 RUN_ID, 0 GLB_DTIME, TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') VALUE_DATEN8,
+                 TRIM(URBREPBR)  BRANCH,
+                 TRIM(SUBSTR(GZEAN2,1,12)) XACCOUNT, GZCCY CCY, ' ' REQ_STAT, ' ' POSTED, TO_NUMBER(GZAMA) AMOUNT,
+                 GZNEGP DR_CR, ' ' AUTH, ' ' NARR_CODE, TRIM(PSTNARR) POST_NARR,
+                 DECODE(SIGN(7-LENGTH(TRIM(GZEAN2))), -1, 'C', 'G' ) CA_GL_IND,
+                 vSource CHEQUE , 'NCHG' CHTRANS, 0 ERR_NBR, 
+                 CASE WHEN SUBSTR(TRIM(GZDLR),1,3) <> TRIM(GZDLP) THEN TRIM(GZDLP) || TRIM(GZDLR) ELSE TRIM(GZDLR) END EXDEALID,
+                 0 RATE1, 'NMSC' TRANS_ID, vXSource XSOURCE,
+                 SUBSTR(TRIM(EXTNARR1),1,35), SUBSTR(TRIM(EXTNARR2),1,35), SUBSTR(TRIM(EXTNARR3),1,35),
+                 SUBSTR(TRIM(EXTNARR4),1,35),
+                 '', GZATP
+
+        FROM ABCINF_TIPSTMSG
+        WHERE PROCESSED = 'N' AND
+                TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+                TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') > vUrbisDate AND
+                BATCH_FULL_RECEIVED = 'Y' AND
+                TRANID = Projection_Trans.TRANID AND
+                TI_RUN_ID <= vTIRunID
+        );
+
+        vStep := 13;
+            
+        UPDATE ABC_REQPO SET POST_NARR = ' ' WHERE SOURCE = vSource AND REQ_ID = vReqId AND NVL( POST_NARR, 'NULL') = 'NULL';
+        UPDATE ABC_REQPO SET NARRATIVE2 = '', NARRATIVE3 = '', NARRATIVE4 = '', NARRATIVE5 = '', NARRATIVE6 = '' WHERE SOURCE = vSource AND REQ_ID = vReqId AND CA_GL_IND = 'G';
+        UPDATE ABC_REQPO SET AMOUNT = ( SELECT AMOUNT / POWER( 10, XDECIMAL ) FROM SYSTWODB_CCYS WHERE ABC_REQPO.CCY = SYSTWODB_CCYS.CCY ) WHERE SOURCE = vSource AND REQ_ID = vReqId AND AMOUNT <> 0;
+
+        -- Update Account open template ID and account title
+        UPDATE ABC_REQPO SET TEMPLATE_ID = ( SELECT DISTINCT TEMPLATE_ID FROM V_ACC_TEMPLATE WHERE SUBSTR( XACCOUNT, 9, 2 ) = BUSINESS_TYPE AND SOURCE = vSource AND CUST_TYPE = 'NONE' ),
+                     TEMPLATE_CCY = '****',
+                     CLIENT_NO = TO_NUMBER(SUBSTR( XACCOUNT,1,6))
+        WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C';
+
+        -- Update Account open template ID for intergroup account
+        UPDATE ABC_REQPO P SET P.TEMPLATE_ID =
+                    ( SELECT A.TEMPLATE_ID FROM V_ACC_TEMPLATE A, SYSTWODB_CLINM C
+                      WHERE SUBSTR( P.XACCOUNT, 9, 2 ) = A.BUSINESS_TYPE AND SUBSTR( P.XACCOUNT, 1, 6) = C.CLIENT_NO AND
+                              INSTR( A.CUST_TYPE, ',' || C.BUS_GRP ) <> 0 AND A.SOURCE = vSource AND A.CUST_TYPE <> 'NONE'
+                    )
+        WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C' AND
+        ( SUBSTR(P.XACCOUNT,9,2), SUBSTR( P.XACCOUNT, 1, 6) ) IN
+            ( SELECT A.BUSINESS_TYPE, C.CLIENT_NO FROM V_ACC_TEMPLATE A, SYSTWODB_CLINM C
+                      WHERE INSTR( A.CUST_TYPE, ',' || C.BUS_GRP ) <> 0 AND A.SOURCE = vSource AND A.CUST_TYPE <> 'NONE'
+                    );
+
+        UPDATE ABC_REQPO SET ACCOUNT_TITLE = ( SELECT XNAME FROM SYSTWODB_CLINM WHERE CLIENT_NO = ABC_REQPO.CLIENT_NO )
+        WHERE SOURCE = vSource AND REQ_ID =  vReqId AND CA_GL_IND = 'C';
+
+        UPDATE ABC_REQPO SET CLIENT_NO = 0, ACCOUNT_TITLE = ' ' ,TEMPLATE_CCY = ' ', TEMPLATE_ID = ' '  WHERE SOURCE = vSource AND REQ_ID = vReqId AND CA_GL_IND  = 'G';
+
+        -- End of Insert into Request Detail
+
+        vStep := 14;
+        
+        -- Insert into Request Header
+        INSERT INTO ABC_REQHD (SOURCE, ACM_CDE, REQ_ID, REQ_STAT, PROC_STAT, VALUE_DATE, ACTION_NO, RUN_ID,
+                ERR_NO, USERCODE, AUTHCODE, BTCH_STAT, BATCH_NO, BRANCH, ERR_NBR, FORCE_POST, INP_DATEN8, LOCATION, PROJECTED,
+                REQUEST_NO, SUSPIND, SUSPENSE)
+        VALUES(vSource, vAcmCde, vReqId, 'C', 'C', vUrbisDate, 0, 0, 0, vUserCode, ' ', 'C', 0, vDefaultBr, 0, ' ',
+                 vUrbisDate, vLocation, 'Y', 0, '0', vSupAcc);
+
+         -- End of Request Header
+
+        vStep := 15;
+        -- Update processed flag
+        UPDATE ABCINF_TIPSTMSG SET PROCESSED = 'Y', PROCESSED_DATE = SYSDATE, BATCH_ID = vReqId
+        WHERE PROCESSED = 'N' AND
+                TO_NUMBER(TO_CHAR(TO_DATE( SUBSTR( TRDATE, 2, 6 ), 'YYMMDD'), 'YYYYMMDD')) <= vUrbisDate AND
+                TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD') > vUrbisDate AND
+                BATCH_FULL_RECEIVED = 'Y' AND
+                TRANID = Projection_Trans.TRANID AND
+                TI_RUN_ID <= vTIRunID;
+
+        -- Insert Log
+        vRet := F_INSERT_LOG( vRunID, vSource, vReqId, 0, vAcmCde, ' ', ' ', 'P_CREATE_TI_BATCH_PROJ', 0, 'Created TI Projection Batch: ' || vReqId, ' ', ' ' );
+
+        COMMIT WORK;
+
+    END LOOP;
+    
+    --  *********************************    end of  projection  ****************************
+
+    UPDATE ABCINF_TIPSTMSG  SET PROCESSED = 'X' WHERE PROCESSED = 'N' AND URBIS_DATE < vUrbisDate AND
+            BATCH_FULL_RECEIVED = 'Y' AND
+            TO_NUMBER(TO_CHAR(TO_DATE(SUBSTR(GZDTE,2,6),'YYMMDD'),'YYYYMMDD')) > TO_NUMBER(TO_CHAR(TO_DATE(SUBSTR(TRDATE,2,6),'YYMMDD'),'YYYYMMDD'));
+
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK WORK;
+        vErrNum := SQLCODE;
+        vErrMsg := SUBSTR( 'STEP: ' || vStep || ',ReqID:' || vReqId || ', ' || SQLERRM, 1, 200);
+        -- Inserting error desc
+        INSERT INTO ABC_BLKERR(RUN_ID,RUN_SEQ,SOURCE,OBJ_NAME,ERR_NBR,ERR_DESC)
+        VALUES(vRunID,BLK_RUN_SEQ.NEXTVAL,'TIPOST','P_CREATE_TI_BATCH',vErrNum,vErrMsg);
+
+        COMMIT WORK;
+
+END;
